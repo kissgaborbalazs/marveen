@@ -2414,6 +2414,21 @@ export const HEARTBEAT_IN_PROGRESS_SQL =
 export const HEARTBEAT_WAITING_SQL =
   "SELECT * FROM kanban_cards WHERE archived_at IS NULL AND status = 'waiting'"
 
+/**
+ * The per-assignee load counts behind the model suggestion (dashboard
+ * /api/agents/model-suggest). Same rule as HEARTBEAT_URGENT_SQL, for the same
+ * reason: `done` is not load. The endpoint used to count every non-archived
+ * card, and reported "8 aktív kártya, ebből 4 sürgős/magas" for a board whose
+ * live half was 4 cards -- the model-choice signal was half closed work.
+ *
+ * Exported so a test can execute the SHIPPED statement against a fixture DB.
+ */
+export const MODEL_SUGGEST_KANBAN_SQL =
+  `SELECT assignee, priority, COUNT(*) as cnt
+     FROM kanban_cards
+    WHERE archived_at IS NULL AND assignee IS NOT NULL AND status != 'done'
+    GROUP BY assignee, priority`
+
 // HBKANBANDRIFT819 follow-up: the heartbeat report format asks for a planned
 // line, so the number needs a sanctioned server-side source like every other
 // count -- without it the agent manufactures the value (measured: planned: 0

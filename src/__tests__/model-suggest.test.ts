@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { classifyPersona, suggestForAgent , humanModelLabel } from '../web/model-suggest.js'
+import { classifyPersona, suggestForAgent , humanModelLabel, CONTEXT_PER_CALL_HIGH } from '../web/model-suggest.js'
 import { DISTRIBUTION_DEFAULT_AGENT_MODEL } from '../config-registry.js'
 
 describe('classifyPersona', () => {
@@ -76,17 +76,17 @@ describe('suggestForAgent -- base (no signals)', () => {
 describe('suggestForAgent -- AgentSignals thresholds', () => {
   const neutralPersona = 'Általános asszisztens vagy.'
 
-  it('tokenAvgInputPerCall > 10K alone adds 1 opus signal point (below threshold without persona hits)', () => {
+  it('tokenAvgContextPerCall above the HIGH band alone adds 1 opus signal point (below threshold without persona hits)', () => {
     // 1 signal hit alone is not enough to push to Opus (need >=2 total)
     const result = suggestForAgent('x', 'claude-sonnet-5', neutralPersona, 0, {
-      tokenAvgInputPerCall: 15_000,
+      tokenAvgContextPerCall: 200_000,
     })
     expect(result.suggestedModel).toBe('claude-sonnet-5')
   })
 
-  it('tokenAvgInputPerCall > 10K + mcpServerCount >= 4 pushes to Opus (2 signal hits)', () => {
+  it('tokenAvgContextPerCall above the HIGH band + mcpServerCount >= 4 pushes to Opus (2 signal hits)', () => {
     const result = suggestForAgent('x', 'claude-sonnet-5', neutralPersona, 0, {
-      tokenAvgInputPerCall: 15_000,
+      tokenAvgContextPerCall: 200_000,
       mcpServerCount: 5,
     })
     expect(result.suggestedModel).toBe(DISTRIBUTION_DEFAULT_AGENT_MODEL)
@@ -151,9 +151,9 @@ describe('suggestForAgent -- AgentSignals thresholds', () => {
     expect(result.suggestedModel).toBe('claude-sonnet-5')
   })
 
-  it('tokenAvgInputPerCall at threshold boundary (exactly 10K) does not trigger', () => {
+  it('tokenAvgContextPerCall at the HIGH boundary (exactly 120K) does not trigger', () => {
     const result = suggestForAgent('x', 'claude-sonnet-5', neutralPersona, 0, {
-      tokenAvgInputPerCall: 10_000,
+      tokenAvgContextPerCall: CONTEXT_PER_CALL_HIGH,
     })
     expect(result.suggestedModel).toBe('claude-sonnet-5')
   })
@@ -163,7 +163,7 @@ describe('suggestForAgent -- reason structure (6 sections)', () => {
   it('reason contains all 6 sections when signals provided', () => {
     const text = 'IT architekt. Komplex elosztott rendszerterv, mikroszolgáltatás, stratégiai döntések.'
     const result = suggestForAgent('rick', 'claude-sonnet-5', text, 0, {
-      tokenAvgInputPerCall: 12_000,
+      tokenAvgContextPerCall: 130_000,
       kanbanOpenCount: 3,
       kanbanUrgentCount: 2,
       scheduledFreqPerDay: 2,
@@ -187,7 +187,7 @@ describe('suggestForAgent -- reason structure (6 sections)', () => {
 
   it('reason section 6 confirms full coverage when all signals present', () => {
     const result = suggestForAgent('x', 'claude-sonnet-5', 'Általános.', 0, {
-      tokenAvgInputPerCall: 5_000,
+      tokenAvgContextPerCall: 50_000,
       kanbanOpenCount: 1,
       kanbanUrgentCount: 0,
       scheduledFreqPerDay: 3,
@@ -203,7 +203,7 @@ describe('suggestForAgent -- reason structure (6 sections)', () => {
       kanbanOpenCount: 0,
       kanbanUrgentCount: 0,
       mcpServerCount: 1,
-      tokenAvgInputPerCall: 500,
+      tokenAvgContextPerCall: 25_000,
     })
     expect(result.suggestedModel).toBe('claude-haiku-4-5-20251001')
     expect(result.reason).toMatch(/olcsóbb/)

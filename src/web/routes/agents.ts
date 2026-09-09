@@ -6,7 +6,7 @@ import { logger } from '../../logger.js'
 import { isModelProfileId, MODEL_PROFILE_IDS } from '../../model-profiles.js'
 import { MAIN_AGENT_ID, currentBotName, PROJECT_ROOT } from '../../config.js'
 import { createAgentMessage, listPendingChannelRequests, updateChannelRequestStatus, getDb, claimPendingForAgent, markMessageFailed, countNewerMessagesFromSameSender,
-  getAgentToolActivity, getAgentMessageActivity, getAgentCurrentCards } from '../../db.js'
+  getAgentToolActivity, getAgentMessageActivity, getAgentCurrentCards, MODEL_SUGGEST_KANBAN_SQL } from '../../db.js'
 import { deriveAgentStatus, AGENT_STATUS_THRESHOLDS } from '../agent-status.js'
 import type { AgentStatusSignals, AgentStatusRow } from '../agent-status.js'
 import { classifyAgentMessage, wrapAgentMessageForDelivery } from '../agent-message-wrap.js'
@@ -146,6 +146,7 @@ import {
 } from '../agent-bundle.js'
 import type { RouteContext } from './types.js'
 import { suggestForAgent, type AgentSignals } from '../model-suggest.js'
+import { collectModelSuggestInputs } from '../model-suggest-inputs.js'
 import { getTokenSummary } from '../token-usage.js'
 import { listScheduledTasks } from '../scheduled-tasks-io.js'
 
@@ -819,22 +820,29 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
     // Collect runtime signals once, then classify per agent.
     // I/O is centralised here; the classifier (model-suggest.ts) stays pure.
 
-    // Token usage: per-agent average input tokens/call over the last 30 days
+    // Token usage: per-agent average CONTEXT tokens/call over the last 30 days.
+    // input_tokens alone measures cache MISSES, not load -- see
+    // AgentSignals.tokenAvgContextPerCall for the measurement that made the
+    // heaviest agent in the fleet read as "alacsony token-fogyasztás".
     const thirtyDaysAgo = Math.floor(Date.now() / 1000) - 30 * 24 * 3600
     const tokenSummaries = getTokenSummary(thirtyDaysAgo)
     const tokenMap = new Map(
-      tokenSummaries.map(s => [s.agent, s.totalCalls > 0 ? s.totalInput / s.totalCalls : 0])
+      tokenSummaries.map(s => [
+        s.agent,
+        s.totalCalls > 0
+          ? (s.totalInput + s.totalCacheRead + s.totalCacheCreation) / s.totalCalls
+          : 0,
+      ])
     )
 
-    // Kanban: open and urgent/high card counts per assignee
+    // Kanban: open and urgent/high card counts per assignee. `done` is excluded
+    // like everywhere else that counts live work (HEARTBEAT_URGENT_SQL): the
+    // signal is "how much is on this agent's plate", and a finished card is not
+    // on anyone's plate. Measured while fixing this: the main agent's board was
+    // reported as "8 aktív kártya" with 4 of them done.
     const db = getDb()
     type KanbanRow = { assignee: string | null; priority: string; cnt: number }
-    const kanbanRows = db.prepare(
-      `SELECT assignee, priority, COUNT(*) as cnt
-       FROM kanban_cards
-       WHERE archived_at IS NULL AND assignee IS NOT NULL
-       GROUP BY assignee, priority`
-    ).all() as KanbanRow[]
+    const kanbanRows = db.prepare(MODEL_SUGGEST_KANBAN_SQL).all() as KanbanRow[]
     const kanbanMap = new Map<string, { open: number; urgent: number }>()
     for (const row of kanbanRows) {
       if (!row.assignee) continue
@@ -869,33 +877,21 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
       }
     } catch { /* scheduled-tasks dir may not exist yet */ }
 
-    // MCP server count: read agents/<name>/.mcp.json
-    function mcpServerCount(agentName: string): number {
-      const mcpPath = join(agentDir(agentName), '.mcp.json')
-      if (!existsSync(mcpPath)) return 0
-      try {
-        const cfg = JSON.parse(readFileSync(mcpPath, 'utf-8')) as { mcpServers?: Record<string, unknown> }
-        return Object.keys(cfg.mcpServers ?? {}).length
-      } catch { return 0 }
-    }
-
+    // Persona / MCP / context reads live in model-suggest-inputs.ts, which
+    // addresses every agent through its REAL config root. This handler used to
+    // read all three out of agents/<name>/, a path the main agent does not have.
     const names = withoutMainAgent(listAgentNames())
     const results = [MAIN_AGENT_ID, ...names].map(name => {
-      const dir = agentDir(name)
-      const claudeMd = readFileOr(join(dir, 'CLAUDE.md'), '')
-      const personaPath = join(PROJECT_ROOT, 'personas', `${name}.md`)
-      const personaMd = existsSync(personaPath) ? readFileSync(personaPath, 'utf-8') : ''
-      const personaText = [claudeMd, personaMd].filter(Boolean).join('\n')
+      const { personaText, mcpServerCount, contextTokens } = collectModelSuggestInputs(name)
       const currentModel = readAgentModel(name)
-      const contextTokens = readContextTokensFromProjectDir(dir) ?? 0
 
       const kanban = kanbanMap.get(name)
       const signals: AgentSignals = {
-        tokenAvgInputPerCall: tokenMap.has(name) ? tokenMap.get(name) : undefined,
+        tokenAvgContextPerCall: tokenMap.has(name) ? tokenMap.get(name) : undefined,
         kanbanOpenCount: kanban?.open,
         kanbanUrgentCount: kanban?.urgent,
         scheduledFreqPerDay: schedFreqMap.has(name) ? schedFreqMap.get(name) : undefined,
-        mcpServerCount: mcpServerCount(name),
+        mcpServerCount,
       }
 
       return suggestForAgent(name, currentModel, personaText, contextTokens, signals)

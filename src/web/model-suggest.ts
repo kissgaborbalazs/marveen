@@ -58,8 +58,21 @@ export interface AgentSuggestionResult {
  * an agent has no history yet.
  */
 export interface AgentSignals {
-  /** token_usage, last 30 days: totalInput / totalCalls */
-  tokenAvgInputPerCall?: number
+  /**
+   * token_usage, last 30 days: (totalInput + totalCacheRead + totalCacheCreation)
+   * / totalCalls -- the average CONTEXT carried into one call, not the fresh
+   * input alone.
+   *
+   * MODELSUGGEST909: with prompt caching on, `input_tokens` is the sliver that
+   * missed the cache and nothing else. Measured on this install over 30 days,
+   * agent=marveen: 928 calls, input_tokens 9,776 (10.5/call) while cache_read
+   * was 237,725,743 and cache_creation 3,077,717 -- 259K of real context per
+   * call. The old signal read that as "alacsony" (<3K) and handed the heaviest
+   * agent in the fleet a downgrade suggestion. Cache reads ARE the context: the
+   * model re-reads every one of those tokens per turn, it is only the BILLING
+   * that is cheaper.
+   */
+  tokenAvgContextPerCall?: number
   /** kanban_cards WHERE assignee=name AND archived_at IS NULL */
   kanbanOpenCount?: number
   /** subset of kanbanOpenCount where priority IN ('urgent','high') */
@@ -100,6 +113,17 @@ const MODEL_COST_PER_M: Record<string, number> = {
   'claude-sonnet-4-6': 3,
   'claude-haiku-4-5': 0.80,
 }
+
+// Context-per-call bands (see AgentSignals.tokenAvgContextPerCall). Calibrated
+// against the only honest yardstick available -- measured fleet traffic, 30 days
+// to 2026-09-09: the main agent runs 224K context/call, a light sub-agent (rita,
+// 18 calls) 61K. Every cached agent carries a ~20-25K floor (system prompt +
+// tool definitions) before it does anything at all, so the LOW band has to sit
+// well above that or it would never be reached. HIGH is deliberately below the
+// 150K live-context override: an agent whose 30-day AVERAGE is that heavy is
+// past the point where the override should have to save it turn by turn.
+export const CONTEXT_PER_CALL_HIGH = 120_000
+export const CONTEXT_PER_CALL_MEDIUM = 40_000
 
 function countKeywordHits(text: string, keywords: string[]): number {
   const lower = text.toLowerCase()
@@ -144,8 +168,8 @@ function buildReason(
 
   // Section 2: Megfigyelt használat
   lines.push('Megfigyelt használat:')
-  const tokenStr = s.tokenAvgInputPerCall !== undefined
-    ? `${(s.tokenAvgInputPerCall / 1000).toFixed(1)}K token/hívás (30 nap átlag)`
+  const tokenStr = s.tokenAvgContextPerCall !== undefined
+    ? `${(s.tokenAvgContextPerCall / 1000).toFixed(1)}K kontextus-token/hívás (30 nap átlag, cache-szel együtt)`
     : 'nincs adat'
   const kanbanStr = s.kanbanOpenCount !== undefined
     ? `${s.kanbanOpenCount} aktív kártya${s.kanbanUrgentCount ? `, ebből ${s.kanbanUrgentCount} sürgős/magas` : ''}`
@@ -156,7 +180,7 @@ function buildReason(
   const mcpStr = s.mcpServerCount !== undefined
     ? `${s.mcpServerCount} MCP szerver`
     : 'nincs adat'
-  lines.push(`  Token-fogyasztás: ${tokenStr}`)
+  lines.push(`  Kontextus-terhelés: ${tokenStr}`)
   lines.push(`  Kanban-terhelés: ${kanbanStr}`)
   lines.push(`  Ütemezési frekvencia: ${schedStr}`)
   lines.push(`  Integráció-mélység: ${mcpStr}`)
@@ -173,15 +197,15 @@ function buildReason(
       : `Általános (${opusKeyHits} opus-jelző, ${haikuKeyHits} haiku-jelző)`
   lines.push(`  Persona komplexitás: ${personaIcon} ${personaDesc}`)
 
-  const tokenIcon = s.tokenAvgInputPerCall === undefined ? '⚠️'
-    : s.tokenAvgInputPerCall > 10_000 ? '❌'
-    : s.tokenAvgInputPerCall > 3_000 ? '⚠️'
+  const tokenIcon = s.tokenAvgContextPerCall === undefined ? '⚠️'
+    : s.tokenAvgContextPerCall > CONTEXT_PER_CALL_HIGH ? '❌'
+    : s.tokenAvgContextPerCall > CONTEXT_PER_CALL_MEDIUM ? '⚠️'
     : '✅'
-  const tokenDesc = s.tokenAvgInputPerCall === undefined ? 'nincs adat'
-    : s.tokenAvgInputPerCall > 10_000 ? 'magas -- komplex, hosszú kontextus'
-    : s.tokenAvgInputPerCall > 3_000 ? 'közepes'
+  const tokenDesc = s.tokenAvgContextPerCall === undefined ? 'nincs adat'
+    : s.tokenAvgContextPerCall > CONTEXT_PER_CALL_HIGH ? 'magas -- komplex, hosszú kontextus'
+    : s.tokenAvgContextPerCall > CONTEXT_PER_CALL_MEDIUM ? 'közepes'
     : 'alacsony'
-  lines.push(`  Token-fogyasztás: ${tokenIcon} ${tokenDesc}`)
+  lines.push(`  Kontextus-terhelés: ${tokenIcon} ${tokenDesc}`)
 
   const kanbanIcon = s.kanbanUrgentCount === undefined ? '⚠️'
     : s.kanbanUrgentCount >= 2 ? '❌'
@@ -218,7 +242,7 @@ function buildReason(
     topReasons.push(`nagy session-kontextus (${Math.round(contextTokens / 1000)}K token)`)
   } else {
     if (opusKeyHits >= 2) topReasons.push(`persona ${opusKeyHits} opus-jelzőt tartalmaz`)
-    if ((s.tokenAvgInputPerCall ?? 0) > 10_000) topReasons.push(`magas token-fogyasztás (${(s.tokenAvgInputPerCall! / 1000).toFixed(1)}K/hívás)`)
+    if ((s.tokenAvgContextPerCall ?? 0) > CONTEXT_PER_CALL_HIGH) topReasons.push(`magas kontextus-terhelés (${(s.tokenAvgContextPerCall! / 1000).toFixed(1)}K/hívás)`)
     if ((s.mcpServerCount ?? 0) >= 4) topReasons.push(`${s.mcpServerCount} MCP integráció`)
     if ((s.kanbanUrgentCount ?? 0) >= 2) topReasons.push(`${s.kanbanUrgentCount} sürgős/magas feladat`)
     if (haikuKeyHits >= 2) topReasons.push(`persona ${haikuKeyHits} haiku-jelzőt tartalmaz`)
@@ -242,7 +266,7 @@ function buildReason(
 
   // Section 6: Bizonytalanság
   const unknowns: string[] = []
-  if (s.tokenAvgInputPerCall === undefined) unknowns.push('token-adat hiányzik')
+  if (s.tokenAvgContextPerCall === undefined) unknowns.push('token-adat hiányzik')
   if (s.kanbanOpenCount === undefined) unknowns.push('kanban-adat hiányzik')
   if (s.scheduledFreqPerDay === undefined) unknowns.push('ütemezési adat hiányzik')
   if (s.mcpServerCount === undefined) unknowns.push('MCP-konfig hiányzik')
@@ -335,7 +359,7 @@ export function suggestForAgent(
   // Signal scoring (runtime observations)
   let opusSignalHits = 0
   let haikuSignalHits = 0
-  if ((s.tokenAvgInputPerCall ?? 0) > 10_000) opusSignalHits++
+  if ((s.tokenAvgContextPerCall ?? 0) > CONTEXT_PER_CALL_HIGH) opusSignalHits++
   if ((s.mcpServerCount ?? 0) >= 4) opusSignalHits++
   if ((s.kanbanUrgentCount ?? 0) >= 2) opusSignalHits++
   if ((s.scheduledFreqPerDay ?? 0) >= 10) haikuSignalHits++
