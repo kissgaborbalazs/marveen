@@ -165,3 +165,16 @@ describe('MODEL_SUGGEST_KANBAN_SQL counts live work only', () => {
     }
   })
 })
+
+describe('the context override still reports the persona it measured', () => {
+  it('prints the real keyword counts, not placeholder zeros', () => {
+    const persona = 'Koordinálod a flottát. Komplex, többlépéses, agentic feladatok, stratégiai döntések.'
+    const result = suggestForAgent('x', 'claude-sonnet-5', persona, 171_000, {})
+    expect(result.suggestedModel).toBe(DISTRIBUTION_DEFAULT_AGENT_MODEL)
+    // The override picks the model; the report must not invent the row beside it.
+    expect(result.reason).not.toMatch(/Általános \(0 opus-jelző, 0 haiku-jelző\)/)
+    expect(result.reason).toMatch(/Persona komplexitás: ❌ Opus-jellegű/)
+    // The recommendation line stays the override's own reason.
+    expect(result.reason).toMatch(/nagy session-kontextus/)
+  })
+})

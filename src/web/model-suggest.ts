@@ -338,6 +338,15 @@ export function suggestForAgent(
 ): AgentSuggestionResult {
   const s = signals ?? {}
 
+  // Keyword scoring (persona-based). Computed BEFORE the override branch: the
+  // override decides the model, but the report still prints a "Persona
+  // komplexitás" row, and that row used to be rendered from hardcoded zeros --
+  // "Általános (0 opus-jelző, 0 haiku-jelző)" for a persona full of them. A
+  // number nobody measured, shown beside measured ones, under a closing line
+  // that says every input is data-backed.
+  const opusKeyHits = countKeywordHits(personaText, OPUS_KEYWORDS)
+  const haikuKeyHits = countKeywordHits(personaText, HAIKU_KEYWORDS)
+
   // Context-window override takes priority over everything
   const contextOverride = contextTokens > 150_000
   if (contextOverride) {
@@ -347,14 +356,13 @@ export function suggestForAgent(
       agent: agentName,
       currentModel,
       suggestedModel,
-      reason: buildReason(currentModel, suggestedModel, contextTokens, 0, 0, 0, 0, s, changeAdvised, true),
+      reason: buildReason(
+        currentModel, suggestedModel, contextTokens,
+        opusKeyHits, haikuKeyHits, 0, 0, s, changeAdvised, true,
+      ),
       changeAdvised,
     }
   }
-
-  // Keyword scoring (persona-based)
-  const opusKeyHits = countKeywordHits(personaText, OPUS_KEYWORDS)
-  const haikuKeyHits = countKeywordHits(personaText, HAIKU_KEYWORDS)
 
   // Signal scoring (runtime observations)
   let opusSignalHits = 0
