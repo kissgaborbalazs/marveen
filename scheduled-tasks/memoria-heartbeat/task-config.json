@@ -4,5 +4,6 @@
   "enabled": true,
   "type": "heartbeat",
   "skipIfBusy": true,
-  "createdAt": 1775669364
+  "createdAt": 1775669364,
+  "preCheck": "precheck.sh"
 }
