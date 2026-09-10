@@ -40,9 +40,17 @@ import subprocess
 import sys
 import time
 
-PROJECT_ROOT = '/home/kgb/marveen'
-DB = os.path.join(PROJECT_ROOT, 'store', 'claudeclaw.db')
-STATE = os.path.join(PROJECT_ROOT, 'store', 'memoria-heartbeat-precheck-state.json')
+# Paths are env-overridable for ONE reason: the contract tests
+# (scripts/__tests__/memoria-heartbeat-precheck.test.py) must exercise the SKIP
+# branch against a throwaway database. Without the override a test either reads
+# the live DB (so "unchanged state" is never reproducible) or the SKIP branch
+# goes untested -- and an untested SKIP branch is exactly how the uuid bug
+# survived the first run: the script never crashed, it just never skipped.
+# Defaults are the live paths, so the scheduler needs no environment at all.
+PROJECT_ROOT = os.environ.get('MEMORIA_PRECHECK_ROOT') or '/home/kgb/marveen'
+DB = os.environ.get('MEMORIA_PRECHECK_DB') or os.path.join(PROJECT_ROOT, 'store', 'claudeclaw.db')
+STATE = (os.environ.get('MEMORIA_PRECHECK_STATE')
+         or os.path.join(PROJECT_ROOT, 'store', 'memoria-heartbeat-precheck-state.json'))
 AGENT = 'marveen'
 SELF_TASK = 'memoria-heartbeat'
 
